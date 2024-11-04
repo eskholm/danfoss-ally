@@ -1,0 +1,97 @@
+danfoss_ally_room_assistant:
+  alias: Danfoss Ally - Room Assistant
+  description: Calculate the average load estimate and temperature for specified entities,
+    and synchronize target temperatures if needed.
+  icon: mdi:thermostat-cog
+  mode: single
+  fields:
+    climate_entities:
+      description: List of Danfoss Ally climate entities (TRVs) for load calculation
+        and synchronization.
+      example: climate.living_room, climate.bedroom
+      required: true
+    temperature_entities:
+      description: List of temperature sensor entities for room temperature averaging.
+      example: sensor.living_room_temp, sensor.bedroom_temp
+      required: true
+  sequence:
+  - variables:
+      load_entities: '{{ climate_entities | map(''replace'', ''climate.'', ''sensor.'')
+        | map(''regex_replace'', ''$'', ''_load_estimate'') | list }}'
+      total_load: '{{ load_entities | map(''states'') | map(''float'', 0) | sum }}'
+      load_count: '{{ load_entities | count }}'
+      average_load: '{{ (total_load / load_count) | round(0) if load_count > 0 else
+        -8000 }}'
+      total_temp: '{{ temperature_entities | map(''states'') | map(''float'', 0) |
+        sum }}'
+      temp_count: '{{ temperature_entities | count }}'
+      average_temp: '{{ ((total_temp / temp_count) * 100) | round(0) if temp_count
+        > 0 else -8000 }}'
+      new_target_temp: '{{ trigger.to_state.attributes.temperature if trigger and
+        trigger.to_state and trigger.to_state.attributes.temperature is not none else
+        None }}'
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ climate_entities | count > 1 }}'
+      sequence:
+      - repeat:
+          for_each: '{{ climate_entities }}'
+          sequence:
+          - data:
+              entity_id: '{{ repeat.item.replace(''climate.'', ''switch.'') + ''_load_balancing_enable''
+                }}'
+            action: switch.turn_on
+    - conditions:
+      - condition: template
+        value_template: '{{ climate_entities | count == 1 }}'
+      sequence:
+      - repeat:
+          for_each: '{{ climate_entities }}'
+          sequence:
+          - data:
+              entity_id: '{{ repeat.item.replace(''climate.'', ''switch.'') + ''_load_balancing_enable''
+                }}'
+            action: switch.turn_off
+  - repeat:
+      for_each: '{{ climate_entities }}'
+      sequence:
+      - choose:
+        - conditions:
+          - condition: template
+            value_template: '{{ climate_entities | count > 1 }}'
+          sequence:
+          - data:
+              entity_id: '{{ repeat.item.replace(''climate.'', ''number.'') + ''_load_room_mean''
+                }}'
+              value: '{{ average_load }}'
+            action: number.set_value
+      - choose:
+        - conditions:
+          - condition: template
+            value_template: '{{ temperature_entities | count > 0 }}'
+          sequence:
+          - data:
+              entity_id: '{{ repeat.item.replace(''climate.'', ''number.'') + ''_external_measured_room_sensor''
+                }}'
+              value: '{{ average_temp }}'
+            action: number.set_value
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ new_target_temp is not none }}'
+      sequence:
+      - repeat:
+          for_each: '{{ climate_entities | reject(''equalto'', trigger.entity_id)
+            | list }}'
+          sequence:
+          - data:
+              entity_id: '{{ repeat.item }}'
+              temperature: '{{ new_target_temp }}'
+            action: climate.set_temperature
+  - action: logbook.log
+    data:
+      name: Load and Temperature Calculation
+      message: 'Calculation completed. Average Load: {{ average_load }}, Average Room
+        Temperature: {{ average_temp / 100 }}. Target temperature synchronized to
+        {{ new_target_temp }} if not None.'

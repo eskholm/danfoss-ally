@@ -1,0 +1,65 @@
+blueprint:
+  name: Danfoss Ally
+  description: >
+    Call a script to calculate the average load and temperature across selected climate entities,
+    and synchronize target temperature across all climate entities if one changes.
+    The automation will only trigger if the state changes, and it can only run if more than 
+    10 minutes have passed since the last execution.
+  domain: automation
+  input:
+    climate_entities:
+      name: Climate Entities
+      description: Select climate entities for load calculation and temperature synchronization.
+      selector:
+        entity:
+          domain: climate
+          multiple: true
+    temperature_entities:
+      name: Temperature Sensor Entities
+      description: Select temperature sensor entities for averaging room temperature.
+      selector:
+        entity:
+          domain: sensor
+          multiple: true
+          device_class: temperature
+
+trigger:
+  # Trigger when the 'temperature' attribute changes on any climate entity
+  - platform: state
+    entity_id: !input climate_entities
+    attribute: "temperature"
+
+  # Trigger when any load estimate changes on a climate entity
+  - platform: state
+    entity_id: !input climate_entities
+    attribute: "load_estimate"
+
+  # Trigger when any temperature sensor state changes
+  - platform: state
+    entity_id: !input temperature_entities
+
+  # Trigger every 15 minutes
+  - platform: time_pattern
+    minutes: "/15"
+
+condition:
+  # Ensure the state actually changed (trigger.from_state != trigger.to_state) but skip for time_pattern trigger
+  - condition: or
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.platform == 'time_pattern' }}"
+      - condition: template
+        value_template: "{{ trigger.from_state.state != trigger.to_state.state }}"
+
+  # Ensure at least 10 minutes have passed since the last run
+  - condition: template
+    value_template: >
+      {{ (as_timestamp(now()) - as_timestamp(state_attr(this.entity_id, 'last_triggered')) | default(0)) > 600 }}
+
+action:
+  - service: script.danfoss_ally_room_assistant
+    data:
+      climate_entities: !input climate_entities
+      temperature_entities: !input temperature_entities
+
+mode: single
