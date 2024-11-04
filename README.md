@@ -1,7 +1,9 @@
 
-# Danfoss Ally Integration for Home Assistant
+# Danfoss Ally Gateway replacement functionality for Home Assistant
 
-This repository contains a blueprint and a script to integrate Danfoss Ally devices directly into Home Assistant, bypassing the need for the official Danfoss Ally gateway. The provided files enable easy configuration and control of Danfoss Ally devices within the Home Assistant environment.
+This repository contains a blueprint and a script to integrate Danfoss Ally devices directly into Home Assistant, bypassing the need for the official Danfoss Ally gateway. The provided files enable easy configuration and control of Danfoss Ally devices within Home Assistant.
+
+The thought is that you create an automation from the blueprint for each room in your setup, selecting the wanted temperature sensors and Ally thermostats. Home Assistant will then facilitate the communication between sensors and thermostats, just like the official gateway.
 
 ## Files in This Repository
 
