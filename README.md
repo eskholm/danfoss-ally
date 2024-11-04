@@ -5,8 +5,8 @@ This repository contains a blueprint and a script to integrate Danfoss Ally devi
 
 ## Files in This Repository
 
-- **`blueprint.yaml`**: The Home Assistant blueprint for configuring and automating Danfoss Ally devices.
-- **`danfoss_ally_script.yaml`**: A Home Assistant script for direct control of Danfoss Ally devices.
+- **`blueprint/danfoss-ally.yaml`**: The Home Assistant blueprint for configuring and automating Danfoss Ally devices.
+- **`script/danfoss-ally-room-assistant.yaml`**: A Home Assistant script for direct control of Danfoss Ally devices.
 
 ## Installation
 
@@ -36,4 +36,4 @@ git clone https://github.com/eskholm/danfoss-ally.git
 Once the files are set up, you can automate and control your Danfoss Ally devices within Home Assistant. Use the blueprint to create automations and the script for manual control of the devices.
 
 ## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GPLv3 License - see the [LICENSE](LICENSE) file for details.
