@@ -1,9 +1,13 @@
 danfoss_ally_room_assistant:
   alias: Danfoss Ally - Room Assistant
-  description: Calculate the average load estimate and temperature for specified entities,
-    and synchronize target temperatures if needed.
+  description: >
+    This script manages Danfoss Ally TRVs by calculating average load estimates and room temperatures, 
+    publishing updates via MQTT, and synchronizing target temperatures across multiple devices. 
+    It also handles load balancing, time synchronization, and radiator coverage activation to improve heating comfort. 
+    The radiator_covered feature is enabled if an external temperature sensor is present, ensuring the TRV prioritizes 
+    external sensor readings for more accurate and comfortable temperature control. Comprehensive logging ensures all actions are documented.
   icon: mdi:thermostat-cog
-  mode: single
+  mode: parallel
   fields:
     climate_entities:
       description: List of Danfoss Ally climate entities (TRVs) for load calculation
@@ -16,41 +20,64 @@ danfoss_ally_room_assistant:
       required: true
   sequence:
   - variables:
-      load_entities: '{{ climate_entities | map(''replace'', ''climate.'', ''sensor.'')
-        | map(''regex_replace'', ''$'', ''_load_estimate'') | list }}'
-      total_load: '{{ load_entities | map(''states'') | map(''float'', 0) | sum }}'
-      load_count: '{{ load_entities | count }}'
+      load_entities: '{{ climate_entities | map("replace", "climate.", "sensor.")
+        | map("regex_replace", "$", "_load_estimate") | list }}'
+      total_load: '{{ load_entities | map("states") | map("float", 0) | select("gt",
+        -500) | sum }}'
+      load_count: '{{ load_entities | map("states") | map("float", 0) | select("gt",
+        -500) | list | count }}'
       average_load: '{{ (total_load / load_count) | round(0) if load_count > 0 else
         -8000 }}'
-      total_temp: '{{ temperature_entities | map(''states'') | map(''float'', 0) |
-        sum }}'
+      total_temp: '{{ temperature_entities | map("states") | map("float", 0) | sum
+        }}'
       temp_count: '{{ temperature_entities | count }}'
       average_temp: '{{ ((total_temp / temp_count) * 100) | round(0) if temp_count
         > 0 else -8000 }}'
       new_target_temp: '{{ trigger.to_state.attributes.temperature if trigger and
         trigger.to_state and trigger.to_state.attributes.temperature is not none else
         None }}'
+      reference_time: '{{ as_timestamp(''2000-01-01T00:00:00'') }}'
+      dst_start: '{{ as_timestamp((now().replace(month=3, day=31) - timedelta(days=(now().replace(month=3,
+        day=31).weekday() + 1) % 7)).replace(hour=2, minute=0, second=0)) }}'
+      dst_end: '{{ as_timestamp((now().replace(month=10, day=31) - timedelta(days=(now().replace(month=10,
+        day=31).weekday() + 1) % 7)).replace(hour=3, minute=0, second=0)) }}'
+  - action: logbook.log
+    data:
+      name: Initialization
+      message: >
+        Variables initialized. Total Load: {{ total_load }}, Load Count: {{ load_count }},
+        Average Load: {{ average_load }}, Total Temp: {{ total_temp }},
+        Temp Count: {{ temp_count }}, Average Temp: {{ average_temp }},
+        New Target Temp: {{ new_target_temp }}
   - choose:
     - conditions:
       - condition: template
         value_template: '{{ climate_entities | count > 1 }}'
       sequence:
+      - action: logbook.log
+        data:
+          name: Load Balancing
+          message: 'Enabling load balancing for all climate entities.'
       - repeat:
           for_each: '{{ climate_entities }}'
           sequence:
           - data:
-              entity_id: '{{ repeat.item.replace(''climate.'', ''switch.'') + ''_load_balancing_enable''
+              entity_id: '{{ repeat.item.replace("climate.", "switch.") + "_load_balancing_enable"
                 }}'
             action: switch.turn_on
     - conditions:
       - condition: template
         value_template: '{{ climate_entities | count == 1 }}'
       sequence:
+      - action: logbook.log
+        data:
+          name: Load Balancing
+          message: 'Disabling load balancing for single climate entity.'
       - repeat:
           for_each: '{{ climate_entities }}'
           sequence:
           - data:
-              entity_id: '{{ repeat.item.replace(''climate.'', ''switch.'') + ''_load_balancing_enable''
+              entity_id: '{{ repeat.item.replace("climate.", "switch.") + "_load_balancing_enable"
                 }}'
             action: switch.turn_off
   - repeat:
@@ -61,29 +88,66 @@ danfoss_ally_room_assistant:
           - condition: template
             value_template: '{{ climate_entities | count > 1 }}'
           sequence:
+          - action: logbook.log
+            data:
+              name: MQTT Update - Load
+              message: >
+                Publishing average load ({{ average_load }}) to MQTT for entity {{ repeat.item }}.
           - data:
-              entity_id: '{{ repeat.item.replace(''climate.'', ''number.'') + ''_load_room_mean''
-                }}'
-              value: '{{ average_load }}'
-            action: number.set_value
+              topic: zigbee2mqtt/{{ state_attr(repeat.item, 'friendly_name') }}/set
+              payload: '{"load_room_mean": {{ average_load }}}'
+              retain: true
+            action: mqtt.publish
+      - choose:
+        - conditions:
+          - condition: template
+            value_template: '{{ now().minute == 0 }}'
+          sequence:
+          - action: logbook.log
+            data:
+              name: MQTT Update - Time Sync
+              message: >
+                Publishing time sync to MQTT for entity {{ repeat.item }}.
+          - data:
+              topic: zigbee2mqtt/{{ state_attr(repeat.item, 'friendly_name') }}/set
+              payload: "{\n  \"write\":{\n    \"cluster\":\"genTime\",\n    \"options\":{},\n
+                \   \"payload\":{\n      \"time\":{{ utcnow().timestamp() - reference_time
+                }},\n      \"dstEnd\":{{ dst_end - reference_time }},\n      \"dstStart\":
+                {{ dst_start - reference_time }},\n      \"timeZone\": {{ now().utcoffset().total_seconds()
+                }},\n      \"timeStatus\": 1\n    }\n  }\n}\n"
+            action: mqtt.publish
       - choose:
         - conditions:
           - condition: template
             value_template: '{{ temperature_entities | count > 0 }}'
           sequence:
-          - data:
-              entity_id: '{{ repeat.item.replace(''climate.'', ''number.'') + ''_external_measured_room_sensor''
+          - action: logbook.log
+            data:
+              name: MQTT Update - Temp
+              message: >
+                Publishing average temperature ({{ average_temp }}) to MQTT for entity {{ repeat.item }}.
+          - action: mqtt.publish
+            data:
+              topic: zigbee2mqtt/{{ state_attr(repeat.item, 'friendly_name') }}/set
+              payload: '{"external_measured_room_sensor": {{ average_temp }}}'
+              retain: true
+          - action: switch.turn_on
+            data:
+              entity_id: '{{ repeat.item.replace("climate.", "switch.") + "_radiator_covered"
                 }}'
-              value: '{{ average_temp }}'
-            action: number.set_value
   - choose:
     - conditions:
       - condition: template
         value_template: '{{ new_target_temp is not none }}'
       sequence:
+      - action: logbook.log
+        data:
+          name: Target Temperature Sync
+          message: >
+            Synchronizing new target temperature ({{ new_target_temp }}) to all TRVs.
       - repeat:
-          for_each: '{{ climate_entities | reject(''equalto'', trigger.entity_id)
-            | list }}'
+          for_each: '{{ climate_entities | reject("equalto", trigger.entity_id) |
+            list }}'
           sequence:
           - data:
               entity_id: '{{ repeat.item }}'
@@ -91,7 +155,12 @@ danfoss_ally_room_assistant:
             action: climate.set_temperature
   - action: logbook.log
     data:
-      name: Load and Temperature Calculation
-      message: 'Calculation completed. Average Load: {{ average_load }}, Average Room
-        Temperature: {{ average_temp / 100 }}. Target temperature synchronized to
-        {{ new_target_temp }} if not None.'
+      name: Finalization
+      message: >
+        Calculation completed. Actions performed:
+        - Average Load: {{ average_load }} (Published to MQTT)
+        - Average Temperature: {{ average_temp / 100 }}°C (Published to MQTT)
+        - Time synchronization sent at top of the hour (if applicable).
+        - Load balancing {{ "enabled" if climate_entities | count > 1 else "disabled" }}.
+        - Radiator coverage activated if external sensors were present.
+        - Target temperature synchronized to {{ new_target_temp if new_target_temp is not none else "not updated" }}.
