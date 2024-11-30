@@ -1,15 +1,15 @@
 blueprint:
   name: Danfoss Ally
   description: >
-    Call a script to calculate the average load and temperature across selected climate entities,
-    and synchronize target temperature across all climate entities if one changes.
-    The automation will only trigger if the state changes, and it can only run if more than 
-    10 minutes have passed since the last execution.
+    Unified automation to calculate the average load and temperature across selected climate entities,
+    synchronize target temperature, and handle window open detection and external switch control.
+    The automation will only run at most every 10 minutes for temperature and load changes, but it will
+    run immediately for window open/close events.
   domain: automation
   input:
     climate_entities:
       name: Climate Entities
-      description: Select climate entities for load calculation and temperature synchronization.
+      description: Select climate entities for load calculation, temperature synchronization, and window handling.
       selector:
         entity:
           domain: climate
@@ -22,41 +22,72 @@ blueprint:
           domain: sensor
           multiple: true
           device_class: temperature
+    window_entities:
+      name: Window Entities
+      description: Select window entities for detecting open/close events (optional).
+      selector:
+        entity:
+          domain: sensor
+          multiple: true
+      default: []  # Default to an empty list
 
 trigger:
-  # Trigger when the 'temperature' attribute changes on any climate entity
   - platform: state
     entity_id: !input climate_entities
     attribute: "temperature"
 
-  # Trigger when any load estimate changes on a climate entity
   - platform: state
     entity_id: !input climate_entities
     attribute: "load_estimate"
 
-  # Trigger when any temperature sensor state changes
   - platform: state
     entity_id: !input temperature_entities
 
-  # Trigger every 15 minutes
+  - platform: state
+    entity_id: !input window_entities
+
   - platform: time_pattern
     minutes: "/15"
 
 condition:
-  # Ensure the state actually changed (trigger.from_state != trigger.to_state) but skip for time_pattern trigger
   - condition: or
     conditions:
       - condition: template
         value_template: "{{ trigger.platform == 'time_pattern' }}"
       - condition: template
-        value_template: "{{ trigger.from_state.state != trigger.to_state.state }}"
+        value_template: >
+          {{ trigger.from_state.state != trigger.to_state.state or
+             trigger.from_state.attributes.get('load_estimate') != trigger.to_state.attributes.get('load_estimate') }}
 
-  # Ensure at least 10 minutes have passed since the last run
   - condition: template
     value_template: >
-      {{ (as_timestamp(now()) - as_timestamp(state_attr(this.entity_id, 'last_triggered')) | default(0)) > 600 }}
+      {% set last_triggered = state_attr(this.entity_id, 'last_triggered') %}
+      {% if trigger.entity_id in (window_entities or []) %}
+        true
+      {% else %}
+        {% if last_triggered is not none %}
+          {{ (as_timestamp(now()) - as_timestamp(last_triggered)) > 600 }}
+        {% else %}
+          true
+        {% endif %}
+      {% endif %}
 
 action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ trigger.entity_id in (window_entities or []) }}
+        sequence:
+          # Handle window events immediately
+          - service: script.danfoss_ally_room_assistant
+            data:
+              climate_entities: !input climate_entities
+              temperature_entities: !input temperature_entities
+
+  # Default block to handle non-window-related actions
+  - delay:
+      seconds: "{{ range(0, 121) | random }}"
   - service: script.danfoss_ally_room_assistant
     data:
       climate_entities: !input climate_entities
