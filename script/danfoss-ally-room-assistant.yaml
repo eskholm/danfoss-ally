@@ -111,10 +111,10 @@ danfoss_ally_room_assistant:
   - action: logbook.log
     data:
       name: Finalization
-      message: 'Calculation completed. Actions performed: - Average Load: {{ average_load
+      message: "Calculation completed. Actions performed: - Average Load: {{ average_load
         }} (Published to MQTT) - Average Temperature: {{ average_temp / 100 }}°C (Published
         to MQTT) - Time synchronization sent at top of the hour (if applicable). -
         Radiator coverage activated if external sensors were present. - Target temperature
-        synchronized to {{ new_target_temp if new_target_temp is not none else "not
-        updated" }}.
+        synchronized to {{ new_target_temp if new_target_temp is not none else 'not
+        updated' }}."
 
