@@ -87,10 +87,11 @@ action:
 
   # Default block to handle non-window-related actions
   - delay:
-      seconds: "{{ range(0, 121) | random }}"
+      seconds: "{{ range(0, 120) | random }}"
   - service: script.danfoss_ally_room_assistant
     data:
       climate_entities: !input climate_entities
       temperature_entities: !input temperature_entities
 
-mode: single
+mode: parallel
+max: 10
