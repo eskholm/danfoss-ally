@@ -36,7 +36,7 @@ danfoss_ally_room_assistant:
       new_target_temp: '{{ trigger.to_state.attributes.temperature if trigger and
         trigger.to_state and trigger.to_state.attributes.temperature is not none else
         None }}'
-      reference_time: '{{ as_timestamp(''2000-01-01T00:00:00'') }}'
+      reference_time: '{{ as_timestamp("2000-01-01T00:00:00") }}'
       dst_start: '{{ as_timestamp((now().replace(month=3, day=31) - timedelta(days=(now().replace(month=3,
         day=31).weekday() + 1) % 7)).replace(hour=2, minute=0, second=0)) }}'
       dst_end: '{{ as_timestamp((now().replace(month=10, day=31) - timedelta(days=(now().replace(month=10,
@@ -44,6 +44,10 @@ danfoss_ally_room_assistant:
   - repeat:
       for_each: '{{ climate_entities }}'
       sequence:
+      - variables:
+          base_topic: '{% set val = states("input_text." ~ repeat.item.split(''.'')[1]
+            ~ "_base_topic") %} {% if val == "unknown" %}zigbee2mqtt{% else %}{{ val
+            }}{% endif %}'
       - choose:
         - conditions:
           - condition: template
@@ -54,19 +58,18 @@ danfoss_ally_room_assistant:
           - action: logbook.log
             data:
               name: MQTT Update - Time Sync
-              message: 'Publishing time sync to MQTT for entity {{ repeat.item }}
-                with a random delay of {{ random_delay }} seconds.
-
-                '
+              message: Publishing time sync to MQTT for entity {{ repeat.item }} with
+                a random delay of {{ random_delay }} seconds.
           - delay:
               seconds: '{{ random_delay }}'
           - data:
-              topic: zigbee2mqtt/{{ state_attr(repeat.item, 'friendly_name') }}/set
+              topic: '{{ base_topic }}/{{ state_attr(repeat.item, "friendly_name")
+                }}/set'
               payload: "{\n  \"write\":{\n    \"cluster\":\"genTime\",\n    \"options\":{},\n
                 \   \"payload\":{\n      \"time\":{{ utcnow().timestamp() - reference_time
-                }},\n      \"dstEnd\":{{ dst_end - reference_time }},\n      \"dstStart\":
-                {{ dst_start - reference_time }},\n      \"timeZone\": {{ now().utcoffset().total_seconds()
-                }},\n      \"timeStatus\": 1\n    }\n  }\n}\n"
+                }},\n      \"dstEnd\":{{ dst_end - reference_time }},\n      \"dstStart\":{{
+                dst_start - reference_time }},\n      \"timeZone\":{{ now().utcoffset().total_seconds()
+                }},\n      \"timeStatus\":1\n    }\n  }\n}\n"
             action: mqtt.publish
       - choose:
         - conditions:
@@ -76,13 +79,17 @@ danfoss_ally_room_assistant:
           - action: logbook.log
             data:
               name: MQTT Update - Temp
-              message: 'Publishing average temperature ({{ average_temp }}) to MQTT
-                for entity {{ repeat.item }}.
-
-                '
+              message: Publishing average temperature ({{ average_temp }}) and load
+                ({{ average_load }}) to MQTT for entity {{ repeat.item }}.
           - data:
-              topic: zigbee2mqtt/{{ state_attr(repeat.item, 'friendly_name') }}/set
+              topic: '{{ base_topic }}/{{ state_attr(repeat.item, "friendly_name")
+                }}/set'
               payload: "{\n  \"external_measured_room_sensor\": {{ average_temp }}\n}\n"
+            action: mqtt.publish
+          - data:
+              topic: '{{ base_topic }}/{{ state_attr(repeat.item, "friendly_name")
+                }}/set'
+              payload: "{\n  \"load_room_mean\": {{ average_load }}\n}\n"
             action: mqtt.publish
           - data:
               entity_id: '{{ repeat.item.replace("climate.", "switch.") + "_radiator_covered"
@@ -96,10 +103,8 @@ danfoss_ally_room_assistant:
       - action: logbook.log
         data:
           name: Target Temperature Sync
-          message: 'Synchronizing new target temperature ({{ new_target_temp }}) to
+          message: Synchronizing new target temperature ({{ new_target_temp }}) to
             all TRVs.
-
-            '
       - repeat:
           for_each: '{{ climate_entities | reject("equalto", trigger.entity_id) |
             list }}'
@@ -111,10 +116,11 @@ danfoss_ally_room_assistant:
   - action: logbook.log
     data:
       name: Finalization
-      message: "Calculation completed. Actions performed: - Average Load: {{ average_load
+      message: 'Calculation completed. Actions performed: - Average Load: {{ average_load
         }} (Published to MQTT) - Average Temperature: {{ average_temp / 100 }}°C (Published
-        to MQTT) - Time synchronization sent at top of the hour (if applicable). -
-        Radiator coverage activated if external sensors were present. - Target temperature
-        synchronized to {{ new_target_temp if new_target_temp is not none else 'not
-        updated' }}."
+        to MQTT) - Time synchronization sent at top of the hour (if applicable) -
+        Radiator coverage activated if external sensors were present - Target temperature
+        synchronized to {{ new_target_temp if new_target_temp is not none else "not
+        updated" }}.
 
+        '
