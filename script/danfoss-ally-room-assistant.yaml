@@ -128,10 +128,16 @@ danfoss_ally_room_assistant:
         for_each: "{{ climate_entities }}"
         sequence:
           - variables:
-              mqtt_topic: >-
-                {%- set val = states('input_text.' ~ repeat.item.split('.')[1] ~ '_base_topic') -%}
-                {{ (val if val not in ['unknown', 'unavailable', ''] else 'zigbee2mqtt')
-                   | trim }}/{{ state_attr(repeat.item, 'friendly_name') }}/set
+              ieee_address: >-
+                {%- set ns = namespace(address='') -%}
+                {%- for identifier in device_attr(repeat.item, 'identifiers') | default([], true) -%}
+                  {%- if identifier | count >= 2 and identifier[0] == 'mqtt'
+                        and identifier[1] is string
+                        and identifier[1].startswith('zigbee2mqtt_') -%}
+                    {%- set ns.address = identifier[1].split('_', 1)[1] | lower -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {{- 'ieee:' ~ ns.address if ns.address else '' -}}
               cover_switch: >-
                 {{ repeat.item | replace('climate.', 'switch.') ~ '_radiator_covered' }}
               heat_switch: >-
@@ -145,6 +151,18 @@ danfoss_ally_room_assistant:
                 {%- else -%}
                   {{- '' -}}
                 {%- endif -%}
+          - variables:
+              route_entry: >-
+                {%- set routes = state_attr('sensor.danfoss_ally_mqtt_routes', 'routes')
+                                | default({}, true) -%}
+                {%- set duplicates = state_attr('sensor.danfoss_ally_mqtt_routes', 'duplicates')
+                                    | default([], true) -%}
+                {{- routes.get(ieee_address.split(':', 1)[1]) if routes is mapping
+                   and ieee_address.startswith('ieee:')
+                   and ieee_address.split(':', 1)[1] not in duplicates else none -}}
+          - variables:
+              mqtt_topic: >-
+                {{ route_entry.get('topic', '') if route_entry is mapping else '' }}
           - variables:
               feedback_age_seconds: >-
                 {%- set feedback = expand(external_feedback_entity) | first | default(none) -%}
@@ -163,63 +181,39 @@ danfoss_ally_room_assistant:
                      or (state_attr(repeat.item, 'temperature') | float
                          - new_target_temp | float) | abs >= 0.01) }}
 
-          # Time sync uses one independent job per TRV, without blocking here.
           - if:
               - condition: template
-                value_template: "{{ schedule_time_sync }}"
+                value_template: "{{ mqtt_topic | length == 0 }}"
             then:
-              - action: script.turn_on
-                target:
-                  entity_id: script.danfoss_ally_time_sync
+              - action: logbook.log
                 data:
-                  variables:
-                    mqtt_topic: "{{ mqtt_topic }}"
-                    parent_run_id: "{{ run_id }}"
-                    log_detailed: "{{ detailed_log }}"
-              - if:
-                  - condition: template
-                    value_template: "{{ detailed_log }}"
-                then:
-                  - action: logbook.log
-                    data:
-                      name: "Danfoss Ally"
-                      entity_id: "{{ repeat.item }}"
-                      message: >-
-                        [{{ run_id }}] CLOCK scheduled for {{ repeat.item }}
-                        (random delay 0-3599s)
-
-          # Existing periodic room updates remain staggered.
-          - if:
-              - condition: template
-                value_template: "{{ send_readings and average_temp is not none }}"
-            then:
-              - delay:
-                  seconds: "{{ range(2, 6) | random }}"
-              - action: mqtt.publish
+                  name: Danfoss Ally Routing Error
+                  entity_id: "{{ repeat.item }}"
+                  message: >-
+                    [{{ run_id }}] ROUTE FAILED for {{ repeat.item }}
+                    ieee={{ ieee_address if ieee_address else 'missing' }}.
+                    No MQTT message sent; check sensor.danfoss_ally_mqtt_routes
+                    and bridge/devices for every Zigbee2MQTT instance.
+              - action: system_log.write
                 data:
-                  topic: "{{ mqtt_topic }}"
-                  payload: >-
-                    {{ {'external_measured_room_sensor': average_temp | int,
-                        'load_room_mean': average_load | int} | to_json }}
+                  level: warning
+                  message: >-
+                    Danfoss Ally [{{ run_id }}] skipped {{ repeat.item }}:
+                    missing or ambiguous MQTT route for {{ ieee_address if ieee_address else 'missing IEEE' }}
+            else:
+              # Time sync uses one independent job per TRV, without blocking here.
               - if:
                   - condition: template
-                    value_template: "{{ detailed_log }}"
+                    value_template: "{{ schedule_time_sync }}"
                 then:
-                  - action: logbook.log
-                    data:
-                      name: "Danfoss Ally"
-                      entity_id: "{{ repeat.item }}"
-                      message: >-
-                        [{{ run_id }}] MQTT ROOM published to {{ mqtt_topic }}
-                        temperature={{ (average_temp | float / 100) | round(2) }}C
-                        load={{ average_load }}
-              - if:
-                  - condition: template
-                    value_template: "{{ is_state(cover_switch, 'off') }}"
-                then:
-                  - action: switch.turn_on
+                  - action: script.turn_on
                     target:
-                      entity_id: "{{ cover_switch }}"
+                      entity_id: script.danfoss_ally_time_sync
+                    data:
+                      variables:
+                        mqtt_topic: "{{ mqtt_topic }}"
+                        parent_run_id: "{{ run_id }}"
+                        log_detailed: "{{ detailed_log }}"
                   - if:
                       - condition: template
                         value_template: "{{ detailed_log }}"
@@ -228,85 +222,128 @@ danfoss_ally_room_assistant:
                         data:
                           name: "Danfoss Ally"
                           entity_id: "{{ repeat.item }}"
-                          message: "[{{ run_id }}] COVER requested on {{ cover_switch }}"
-              - if:
-                  - condition: template
-                    value_template: >-
-                      {{ supply_sensor | length > 0 and is_number(states(supply_sensor))
-                         and states(heat_switch) in ['on', 'off'] }}
-                then:
-                  - choose:
-                      - conditions:
-                          - condition: template
-                            value_template: >-
-                              {{ states(supply_sensor) | float > supply_threshold
-                                 and is_state(heat_switch, 'off') }}
-                        sequence:
-                          - action: switch.turn_on
-                            target:
-                              entity_id: "{{ heat_switch }}"
-                          - if:
-                              - condition: template
-                                value_template: "{{ detailed_log }}"
-                            then:
-                              - action: logbook.log
-                                data:
-                                  name: "Danfoss Ally"
-                                  entity_id: "{{ repeat.item }}"
-                                  message: "[{{ run_id }}] HEAT requested on {{ heat_switch }}"
-                      - conditions:
-                          - condition: template
-                            value_template: >-
-                              {{ states(supply_sensor) | float <= supply_threshold
-                                 and is_state(heat_switch, 'on') }}
-                        sequence:
-                          - action: switch.turn_off
-                            target:
-                              entity_id: "{{ heat_switch }}"
-                          - if:
-                              - condition: template
-                                value_template: "{{ detailed_log }}"
-                            then:
-                              - action: logbook.log
-                                data:
-                                  name: "Danfoss Ally"
-                                  entity_id: "{{ repeat.item }}"
-                                  message: "[{{ run_id }}] HEAT requested off {{ heat_switch }}"
+                          message: >-
+                            [{{ run_id }}] CLOCK scheduled for {{ repeat.item }}
+                            (random delay 0-3599s)
 
-          # For setpoint changes, combine external temperature (when fresh
-          # feedback is needed) and target in a single Z2M MQTT message.
-          # The originating TRV already has its requested target.
-          - if:
-              - condition: template
-                value_template: "{{ change_target or refresh_temp_on_setpoint }}"
-            then:
-              - delay:
-                  seconds: "{{ range(1, 4) | random }}"
-              - action: mqtt.publish
-                data:
-                  topic: "{{ mqtt_topic }}"
-                  payload: >-
-                    {% set ns = namespace(payload={}) %}
-                    {% if refresh_temp_on_setpoint %}
-                      {% set ns.payload = dict(ns.payload, external_measured_room_sensor=average_temp | int) %}
-                    {% endif %}
-                    {% if change_target %}
-                      {% set ns.payload = dict(ns.payload, occupied_heating_setpoint=new_target_temp | float) %}
-                    {% endif %}
-                    {{ ns.payload | to_json }}
+              # Existing periodic room updates remain staggered.
               - if:
                   - condition: template
-                    value_template: "{{ detailed_log }}"
+                    value_template: "{{ send_readings and average_temp is not none }}"
                 then:
-                  - action: logbook.log
+                  - delay:
+                      seconds: "{{ range(2, 6) | random }}"
+                  - action: mqtt.publish
                     data:
-                      name: "Danfoss Ally"
-                      entity_id: "{{ repeat.item }}"
-                      message: >-
-                        [{{ run_id }}] MQTT SETPOINT published to {{ mqtt_topic }}
-                        target={{ new_target_temp if change_target else 'unchanged' }}
-                        external_temp={{ (average_temp | float / 100) | round(2) if refresh_temp_on_setpoint else 'unchanged' }}
+                      topic: "{{ mqtt_topic }}"
+                      payload: >-
+                        {{ {'external_measured_room_sensor': average_temp | int,
+                            'load_room_mean': average_load | int} | to_json }}
+                  - if:
+                      - condition: template
+                        value_template: "{{ detailed_log }}"
+                    then:
+                      - action: logbook.log
+                        data:
+                          name: "Danfoss Ally"
+                          entity_id: "{{ repeat.item }}"
+                          message: >-
+                            [{{ run_id }}] MQTT ROOM published to {{ mqtt_topic }}
+                            temperature={{ (average_temp | float / 100) | round(2) }}C
+                            load={{ average_load }}
+                  - if:
+                      - condition: template
+                        value_template: "{{ is_state(cover_switch, 'off') }}"
+                    then:
+                      - action: switch.turn_on
+                        target:
+                          entity_id: "{{ cover_switch }}"
+                      - if:
+                          - condition: template
+                            value_template: "{{ detailed_log }}"
+                        then:
+                          - action: logbook.log
+                            data:
+                              name: "Danfoss Ally"
+                              entity_id: "{{ repeat.item }}"
+                              message: "[{{ run_id }}] COVER requested on {{ cover_switch }}"
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ supply_sensor | length > 0 and is_number(states(supply_sensor))
+                             and states(heat_switch) in ['on', 'off'] }}
+                    then:
+                      - choose:
+                          - conditions:
+                              - condition: template
+                                value_template: >-
+                                  {{ states(supply_sensor) | float > supply_threshold
+                                     and is_state(heat_switch, 'off') }}
+                            sequence:
+                              - action: switch.turn_on
+                                target:
+                                  entity_id: "{{ heat_switch }}"
+                              - if:
+                                  - condition: template
+                                    value_template: "{{ detailed_log }}"
+                                then:
+                                  - action: logbook.log
+                                    data:
+                                      name: "Danfoss Ally"
+                                      entity_id: "{{ repeat.item }}"
+                                      message: "[{{ run_id }}] HEAT requested on {{ heat_switch }}"
+                          - conditions:
+                              - condition: template
+                                value_template: >-
+                                  {{ states(supply_sensor) | float <= supply_threshold
+                                     and is_state(heat_switch, 'on') }}
+                            sequence:
+                              - action: switch.turn_off
+                                target:
+                                  entity_id: "{{ heat_switch }}"
+                              - if:
+                                  - condition: template
+                                    value_template: "{{ detailed_log }}"
+                                then:
+                                  - action: logbook.log
+                                    data:
+                                      name: "Danfoss Ally"
+                                      entity_id: "{{ repeat.item }}"
+                                      message: "[{{ run_id }}] HEAT requested off {{ heat_switch }}"
 
+              # For setpoint changes, combine external temperature (when fresh
+              # feedback is needed) and target in a single Z2M MQTT message.
+              # The originating TRV already has its requested target.
+              - if:
+                  - condition: template
+                    value_template: "{{ change_target or refresh_temp_on_setpoint }}"
+                then:
+                  - delay:
+                      seconds: "{{ range(1, 4) | random }}"
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ mqtt_topic }}"
+                      payload: >-
+                        {% set ns = namespace(payload={}) %}
+                        {% if refresh_temp_on_setpoint %}
+                          {% set ns.payload = dict(ns.payload, external_measured_room_sensor=average_temp | int) %}
+                        {% endif %}
+                        {% if change_target %}
+                          {% set ns.payload = dict(ns.payload, occupied_heating_setpoint=new_target_temp | float) %}
+                        {% endif %}
+                        {{ ns.payload | to_json }}
+                  - if:
+                      - condition: template
+                        value_template: "{{ detailed_log }}"
+                    then:
+                      - action: logbook.log
+                        data:
+                          name: "Danfoss Ally"
+                          entity_id: "{{ repeat.item }}"
+                          message: >-
+                            [{{ run_id }}] MQTT SETPOINT published to {{ mqtt_topic }}
+                            target={{ new_target_temp if change_target else 'unchanged' }}
+                            external_temp={{ (average_temp | float / 100) | round(2) if refresh_temp_on_setpoint else 'unchanged' }}
     # Give Zigbee2MQTT time to report target changes before processing
     # queued echoes. A subsequent manual change remains queued, not lost.
     - if:
