@@ -137,7 +137,7 @@ danfoss_ally_room_assistant:
                     {%- set ns.address = identifier[1].split('_', 1)[1] | lower -%}
                   {%- endif -%}
                 {%- endfor -%}
-                {{- ns.address -}}
+                {{- 'ieee:' ~ ns.address if ns.address else '' -}}
               cover_switch: >-
                 {{ repeat.item | replace('climate.', 'switch.') ~ '_radiator_covered' }}
               heat_switch: >-
@@ -157,8 +157,9 @@ danfoss_ally_room_assistant:
                                 | default({}, true) -%}
                 {%- set duplicates = state_attr('sensor.danfoss_ally_mqtt_routes', 'duplicates')
                                     | default([], true) -%}
-                {{- routes.get(ieee_address) if routes is mapping
-                   and ieee_address not in duplicates else none -}}
+                {{- routes.get(ieee_address.split(':', 1)[1]) if routes is mapping
+                   and ieee_address.startswith('ieee:')
+                   and ieee_address.split(':', 1)[1] not in duplicates else none -}}
           - variables:
               mqtt_topic: >-
                 {{ route_entry.get('topic', '') if route_entry is mapping else '' }}
