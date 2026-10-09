@@ -1,9 +1,9 @@
 blueprint:
   name: Danfoss Ally
   description: >
-    Keep Danfoss Ally room temperatures and loads updated every 10 minutes,
-    synchronize setpoint changes immediately, and refresh on window events.
-    Stagger normal updates across rooms and time synchronization across an hour.
+    Keep Danfoss Ally room temperature and load updated every 10 minutes.
+    Synchronize setpoint changes with fresh temperature data when needed,
+    and trigger immediate room refreshes on window state changes.
   domain: automation
   input:
     climate_entities:
@@ -15,7 +15,7 @@ blueprint:
           multiple: true
     temperature_entities:
       name: Temperature sensors
-      description: Room sensors used for the mean external temperature.
+      description: Room sensors used for the external temperature average.
       selector:
         entity:
           domain: sensor
@@ -23,7 +23,7 @@ blueprint:
           multiple: true
     window_entities:
       name: Window entities (optional)
-      description: Changes cause an immediate room-data refresh; no window mode is toggled.
+      description: Changes trigger an immediate room-data refresh.
       default: []
       selector:
         entity:
@@ -34,13 +34,20 @@ blueprint:
     heat_available_sensor:
       name: Heating supply temperature (optional)
       description: >
-        If selected, update each thermostat's heat_available switch according
-        to the threshold. Leave empty to keep existing switch behavior.
+        Optional supply-temperature sensor for heat_available switches.
       default: ""
       selector:
         entity:
           domain: sensor
           device_class: temperature
+    detailed_logging:
+      name: Detailed run logging
+      description: >
+        Write per-thermostat actions to Home Assistant Activity, in addition
+        to the default START/END run entries. Can produce many log entries.
+      default: false
+      selector:
+        boolean: {}
     heat_available_threshold:
       name: Heat available above (°C)
       default: 50
@@ -51,6 +58,9 @@ blueprint:
           step: 1
           unit_of_measurement: "°C"
           mode: box
+
+variables:
+  room_climates: !input climate_entities
 
 triggers:
   - trigger: state
@@ -69,14 +79,31 @@ actions:
       - conditions:
           - condition: template
             value_template: >-
-              {{ trigger.id == 'setpoint' and trigger.to_state is not none
-                 and is_number(trigger.to_state.attributes.get('temperature')) }}
+              {% set ns = namespace(peer_needs_update=false) %}
+              {% if trigger.id == 'setpoint' and trigger.to_state is not none
+                    and is_number(trigger.to_state.attributes.get('temperature')) %}
+                {% set target = trigger.to_state.attributes.temperature | float %}
+                {% for entity in room_climates %}
+                  {% if entity != trigger.entity_id
+                        and (not is_number(state_attr(entity, 'temperature'))
+                             or (state_attr(entity, 'temperature') | float - target) | abs >= 0.01) %}
+                    {% set ns.peer_needs_update = true %}
+                  {% endif %}
+                {% endfor %}
+                {{ is_number(state_attr(trigger.entity_id, 'temperature'))
+                   and (state_attr(trigger.entity_id, 'temperature') | float - target) | abs < 0.01
+                   and (ns.peer_needs_update or room_climates | count == 1) }}
+              {% else %}
+                false
+              {% endif %}
         sequence:
           - action: script.danfoss_ally_room_assistant
             data:
               climate_entities: !input climate_entities
               temperature_entities: !input temperature_entities
               update_readings: false
+              call_reason: setpoint
+              detailed_logging: !input detailed_logging
               requested_temperature: "{{ trigger.to_state.attributes.temperature }}"
               changed_entity: "{{ trigger.entity_id }}"
       - conditions:
@@ -89,23 +116,32 @@ actions:
               temperature_entities: !input temperature_entities
               heat_available_sensor: !input heat_available_sensor
               heat_available_threshold: !input heat_available_threshold
+              call_reason: window
+              detailed_logging: !input detailed_logging
     default:
       - condition: template
         value_template: "{{ trigger.id == 'periodic' }}"
-      # Capture the hourly decision BEFORE staggering this room's update.
       - variables:
           request_time_sync: "{{ now().minute == 0 }}"
-      - delay:
-          seconds: "{{ range(0, 120) | random }}"
-      - action: script.danfoss_ally_room_assistant
+      # Periodic jitter happens in a background script so a setpoint trigger
+      # never waits for that delay before this automation can process it.
+      - action: script.turn_on
+        target:
+          entity_id: script.danfoss_ally_room_assistant
         data:
-          climate_entities: !input climate_entities
-          temperature_entities: !input temperature_entities
-          heat_available_sensor: !input heat_available_sensor
-          heat_available_threshold: !input heat_available_threshold
-          time_sync: "{{ request_time_sync }}"
+          variables:
+            climate_entities: !input climate_entities
+            temperature_entities: !input temperature_entities
+            heat_available_sensor: !input heat_available_sensor
+            heat_available_threshold: !input heat_available_threshold
+            stagger_room: true
+            call_reason: periodic
+            detailed_logging: !input detailed_logging
+            time_sync: "{{ request_time_sync }}"
 
-mode: parallel
-max: 30
+# One automation instance per room. Mirrored setpoint state changes are
+# queued and skipped once other TRVs have converged.
+mode: queued
+max: 100
 trace:
   stored_traces: 100
