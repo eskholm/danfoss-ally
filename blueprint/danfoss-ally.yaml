@@ -1,99 +1,109 @@
 blueprint:
   name: Danfoss Ally
   description: >
-    Unified automation to calculate the average load and temperature across selected climate entities,
-    synchronize target temperature, and handle window open detection and external switch control.
-    The automation will only run at most every 10 minutes for temperature and load changes, but it will
-    run immediately for window open/close events.
+    Keep Danfoss Ally room temperatures and loads updated every 10 minutes,
+    synchronize setpoint changes immediately, and refresh on window events.
+    Stagger normal updates across rooms and time synchronization across an hour.
   domain: automation
   input:
     climate_entities:
-      name: Climate Entities
-      description: Select climate entities for load calculation, temperature synchronization, and window handling.
+      name: Climate entities
+      description: Danfoss Ally thermostats in this room.
       selector:
         entity:
           domain: climate
           multiple: true
     temperature_entities:
-      name: Temperature Sensor Entities
-      description: Select temperature sensor entities for averaging room temperature.
+      name: Temperature sensors
+      description: Room sensors used for the mean external temperature.
       selector:
         entity:
           domain: sensor
-          multiple: true
           device_class: temperature
+          multiple: true
     window_entities:
-      name: Window Entities
-      description: Select window entities for detecting open/close events (optional).
+      name: Window entities (optional)
+      description: Changes cause an immediate room-data refresh; no window mode is toggled.
+      default: []
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+            - domain: binary_sensor
+          multiple: true
+    heat_available_sensor:
+      name: Heating supply temperature (optional)
+      description: >
+        If selected, update each thermostat's heat_available switch according
+        to the threshold. Leave empty to keep existing switch behavior.
+      default: ""
       selector:
         entity:
           domain: sensor
-          multiple: true
-      default: []  # Default to an empty list
+          device_class: temperature
+    heat_available_threshold:
+      name: Heat available above (°C)
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "°C"
+          mode: box
 
-trigger:
-  - platform: state
+triggers:
+  - trigger: state
+    id: setpoint
     entity_id: !input climate_entities
-    attribute: "temperature"
-
-  - platform: state
-    entity_id: !input climate_entities
-    attribute: "load_estimate"
-
-  - platform: state
-    entity_id: !input temperature_entities
-
-  - platform: state
+    attribute: temperature
+  - trigger: state
+    id: window
     entity_id: !input window_entities
+  - trigger: time_pattern
+    id: periodic
+    minutes: "/10"
 
-  - platform: time_pattern
-    minutes: "/5"
-
-condition:
-  - condition: or
-    conditions:
-      - condition: template
-        value_template: "{{ trigger.platform == 'time_pattern' }}"
-      - condition: template
-        value_template: >
-          {{ trigger.from_state.state != trigger.to_state.state or
-             trigger.from_state.attributes.get('load_estimate') != trigger.to_state.attributes.get('load_estimate') }}
-
-  - condition: template
-    value_template: >
-      {% set last_triggered = state_attr(this.entity_id, 'last_triggered') %}
-      {% if trigger.entity_id in (window_entities or []) %}
-        true
-      {% else %}
-        {% if last_triggered is not none %}
-          {{ (as_timestamp(now()) - as_timestamp(last_triggered)) > 600 }}
-        {% else %}
-          true
-        {% endif %}
-      {% endif %}
-
-action:
+actions:
   - choose:
       - conditions:
           - condition: template
-            value_template: >
-              {{ trigger.entity_id in (window_entities or []) }}
+            value_template: >-
+              {{ trigger.id == 'setpoint' and trigger.to_state is not none
+                 and is_number(trigger.to_state.attributes.get('temperature')) }}
         sequence:
-          # Handle window events immediately
-          - service: script.danfoss_ally_room_assistant
+          - action: script.danfoss_ally_room_assistant
             data:
               climate_entities: !input climate_entities
               temperature_entities: !input temperature_entities
-
-  # Default block to handle non-window-related actions
-  - delay:
-      seconds: "{{ range(0, 120) | random }}"
-  - service: script.danfoss_ally_room_assistant
-    data:
-      climate_entities: !input climate_entities
-      temperature_entities: !input temperature_entities
+              update_readings: false
+              requested_temperature: "{{ trigger.to_state.attributes.temperature }}"
+              changed_entity: "{{ trigger.entity_id }}"
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'window' }}"
+        sequence:
+          - action: script.danfoss_ally_room_assistant
+            data:
+              climate_entities: !input climate_entities
+              temperature_entities: !input temperature_entities
+              heat_available_sensor: !input heat_available_sensor
+              heat_available_threshold: !input heat_available_threshold
+    default:
+      # Capture the hourly decision BEFORE staggering this room's update.
+      - variables:
+          request_time_sync: "{{ now().minute == 0 }}"
+      - delay:
+          seconds: "{{ range(0, 120) | random }}"
+      - action: script.danfoss_ally_room_assistant
+        data:
+          climate_entities: !input climate_entities
+          temperature_entities: !input temperature_entities
+          heat_available_sensor: !input heat_available_sensor
+          heat_available_threshold: !input heat_available_threshold
+          time_sync: "{{ request_time_sync }}"
 
 mode: parallel
-max: 10
+max: 30
 trace:
-  stored_traces: 200
+  stored_traces: 100
