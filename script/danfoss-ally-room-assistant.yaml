@@ -129,15 +129,15 @@ danfoss_ally_room_assistant:
         sequence:
           - variables:
               ieee_address: >-
-                {% set ns = namespace(address='') %}
-                {% for identifier in device_attr(repeat.item, 'identifiers') | default([], true) %}
-                  {% if identifier | count >= 2 and identifier[0] == 'mqtt'
+                {%- set ns = namespace(address='') -%}
+                {%- for identifier in device_attr(repeat.item, 'identifiers') | default([], true) -%}
+                  {%- if identifier | count >= 2 and identifier[0] == 'mqtt'
                         and identifier[1] is string
-                        and identifier[1].startswith('zigbee2mqtt_') %}
-                    {% set ns.address = identifier[1].split('_', 1)[1] | lower %}
-                  {% endif %}
-                {% endfor %}
-                {{ ns.address }}
+                        and identifier[1].startswith('zigbee2mqtt_') -%}
+                    {%- set ns.address = identifier[1].split('_', 1)[1] | lower -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {{- ns.address -}}
               cover_switch: >-
                 {{ repeat.item | replace('climate.', 'switch.') ~ '_radiator_covered' }}
               heat_switch: >-
@@ -153,12 +153,12 @@ danfoss_ally_room_assistant:
                 {%- endif -%}
           - variables:
               route_entry: >-
-                {% set routes = state_attr('sensor.danfoss_ally_mqtt_routes', 'routes')
-                                | default({}, true) %}
-                {% set duplicates = state_attr('sensor.danfoss_ally_mqtt_routes', 'duplicates')
-                                    | default([], true) %}
-                {{ routes.get(ieee_address) if routes is mapping
-                   and ieee_address not in duplicates else none }}
+                {%- set routes = state_attr('sensor.danfoss_ally_mqtt_routes', 'routes')
+                                | default({}, true) -%}
+                {%- set duplicates = state_attr('sensor.danfoss_ally_mqtt_routes', 'duplicates')
+                                    | default([], true) -%}
+                {{- routes.get(ieee_address) if routes is mapping
+                   and ieee_address not in duplicates else none -}}
           - variables:
               mqtt_topic: >-
                 {{ route_entry.get('topic', '') if route_entry is mapping else '' }}
