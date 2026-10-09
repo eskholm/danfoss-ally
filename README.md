@@ -65,10 +65,8 @@ This is per-room pacing, **not** a global Zigbee rate limiter. With many
 rooms, traffic can still overlap. Time synchronization jobs are capped at
 250 concurrent runs; increase the helper script's `max` if needed.
 
-The scripts retain the original topic lookup convention:
-`input_text.<climate_entity_object_id>_base_topic` (default:
-`zigbee2mqtt`) and `climate` entity `friendly_name` as the Zigbee2MQTT
-device name. Verify these match your Zigbee2MQTT configuration.
+The scripts use the automatic IEEE-to-topic route registry described below.
+Missing or ambiguous routes are treated as errors, never guessed.
 
 Danfoss Ally in radiator-covered / external-room-sensor mode needs a fresh
 external temperature within 30 minutes. The periodic 10-minute refresh
@@ -98,6 +96,64 @@ retains 20. Trace retention is still bounded; Activity log entries follow
 the Recorder retention configuration. The Activity logger is affected by
 Logbook include/exclude filters. Changing logging does not create MQTT or
 Zigbee traffic.
+
+## Automatic Zigbee2MQTT routing (required)
+
+All Zigbee2MQTT instances must publish to the **same MQTT broker** and have
+different single-segment `base_topic` values (e.g. `zigbee2mqtt` and
+`zigbee2mqttstueplan`).
+
+Install `template/danfoss-ally-routes.yaml` **before installing the new
+Room Assistant script**:
+
+1. Merge the list item in that file into your existing `template:` YAML
+   configuration. If you have no existing `template:` key, you can use
+   `template: !include template/danfoss-ally-routes.yaml` in
+   `configuration.yaml` after placing the file in that directory.
+   Do not create a second `template:` key.
+2. Check Home Assistant's YAML configuration and reload Template entities
+   (or restart Home Assistant). The new entity is normally
+   `sensor.danfoss_ally_mqtt_routes`. Rename it to that exact entity ID
+   in the entity registry if Home Assistant chooses another.
+3. In **Developer Tools → Template**, check that the expected route exists:
+   ```jinja2
+   {{ state_attr('sensor.danfoss_ally_mqtt_routes', 'routes')
+      .get('0x3410f4fffe60c454') }}
+   ```
+   For this example, the route must contain
+   `zigbee2mqttstueplan/Radiator dagligstuen 2/set`.
+4. Only after route discovery has populated all the required TRVs, deploy
+   the new Room Assistant script and reload scripts.
+
+The routing sensor subscribes to `+/bridge/devices`, which picks up all
+single-level Zigbee2MQTT network roots automatically. Each instance's
+retained device list contains physical IEEE addresses and its actual
+Zigbee2MQTT `friendly_name`. Only Danfoss devices (based on the
+`definition.vendor` field) are indexed.
+
+The Room Assistant obtains its radiator's IEEE address from Home Assistant's
+MQTT device-registry identifier, normally
+`('mqtt', 'zigbee2mqtt_0x<IEEE>')`. It looks that address up in the routing
+sensor and publishes directly to the correct root and device name.
+
+When devices move between bridges or their Zigbee2MQTT names change, the next
+`bridge/devices` update refreshes the corresponding route. When a device
+appears in two bridge lists, its IEEE address is listed in the
+`duplicates` attribute and both writes are suppressed until the
+conflict is resolved. This is intentionally fail-closed: an unknown or
+ambiguous route emits a Logbook warning and system-log warning rather than
+silently falling back to `zigbee2mqtt`.
+
+The old `input_text.<device>_base_topic` helpers are no longer used and can
+be removed **after** routing is verified. MQTT bridge payloads are retained
+and the trigger-based sensor restores its last state after a restart.
+If any bridge does not publish retained `bridge/devices`, its routes may
+remain stale until the bridge publishes its device list.
+
+The routing map is stored in a sensor attribute. To keep it reasonably small,
+only devices whose Zigbee2MQTT vendor contains `Danfoss` are stored.
+The map is managed by Home Assistant's Recorder; do not exclude the routing
+sensor from Recorder if you want its state restored on restart.
 
 ## Migration from the earlier version
 
