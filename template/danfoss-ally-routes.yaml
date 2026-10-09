@@ -1,0 +1,67 @@
+# This file is a *list item* for Home Assistant's "template:" integration.
+# Append it to an existing template: list, or use
+#   template: !include template/danfoss-ally-routes.yaml
+# when no template: entry exists yet.
+#
+# The single-level wildcard covers every Zigbee2MQTT base_topic without
+# having to list the four networks by name. Zigbee2MQTT publishes
+# <base_topic>/bridge/devices as a retained message.
+- triggers:
+    - trigger: mqtt
+      topic: "+/bridge/devices"
+  sensor:
+    - name: Danfoss Ally MQTT Routes
+      unique_id: danfoss_ally_mqtt_routes
+      icon: mdi:router-wireless
+      # The sensor state is diagnostic only; the network/route maps below
+      # are where all routing decisions come from.
+      state: "{{ trigger.topic.split('/')[0] }}"
+      attributes: >-
+        {% set base = trigger.topic.split('/')[0] %}
+        {% set old = this.attributes.get('networks', {}) | default({}, true) %}
+        {% set ns = namespace(networks={}) %}
+        {% if old is mapping %}
+          {% for old_base, old_devices in old.items() %}
+            {% if old_base != base and old_devices is mapping %}
+              {% set ns.networks = dict(ns.networks, **{old_base: old_devices}) %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+
+        {# Replace this network's list on every bridge/devices message.
+           Removing a device removes its old route for this network. #}
+        {% set found = namespace(devices={}) %}
+        {% if trigger.payload_json is sequence and
+              trigger.payload_json is not string %}
+          {% for dev in trigger.payload_json if dev is mapping %}
+            {% set definition = dev.get('definition') or {} %}
+            {% set vendor = (definition.get('vendor') or '') | lower
+               if definition is mapping else '' %}
+            {% set ieee = (dev.get('ieee_address') or '') | lower %}
+            {% set name = dev.get('friendly_name') or '' %}
+            {% if 'danfoss' in vendor and ieee.startswith('0x')
+                  and name | length > 0 and not dev.get('disabled', false) %}
+              {% set found.devices = dict(found.devices, **{ieee: name}) %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% set ns.networks = dict(ns.networks, **{base: found.devices}) %}
+
+        {# Never select an arbitrary network when the same IEEE address
+           appears on multiple bridge lists. #}
+        {% set combined = namespace(routes={}, duplicates=[]) %}
+        {% for network, devices in ns.networks.items() %}
+          {% for ieee, name in devices.items() %}
+            {% if ieee in combined.routes %}
+              {% set combined.duplicates = combined.duplicates + [ieee] %}
+            {% else %}
+              {% set combined.routes = dict(combined.routes,
+                   **{ieee: {'base_topic': network,
+                              'friendly_name': name,
+                              'topic': network ~ '/' ~ name ~ '/set'}}) %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {{ {'networks': ns.networks,
+            'routes': combined.routes,
+            'duplicates': combined.duplicates | unique | list} }}
