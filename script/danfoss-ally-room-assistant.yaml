@@ -11,11 +11,11 @@ danfoss_ally_room_assistant:
     climate_entities:
       description: Danfoss Ally climate entities in the room.
       required: true
-      example: ["climate.living_room", "climate.living_room_2"]
+      example: "['climate.living_room', 'climate.living_room_2']"
     temperature_entities:
       description: Temperature sensors for the room average.
       required: true
-      example: ["sensor.living_room_temp"]
+      example: "['sensor.living_room_temp']"
     requested_temperature:
       description: Optional target temperature to synchronize.
       required: false
