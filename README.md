@@ -34,7 +34,8 @@ starts `script.danfoss_ally_time_sync` independently for each TRV.
 - Once per hour, each thermostat also receives an independent time
   synchronization job delayed by a random 0–3599 seconds. The job does not
   block setpoint or temperature updates. `time` is measured from the UTC
-  Zigbee epoch (2000-01-01).
+  Zigbee epoch (2000-01-01). The time-zone attribute is the
+  standard offset without DST; `dstShift` is sent separately.
 - A setpoint change is synchronized without waiting for the periodic update.
   Thermostats already at that target are skipped; needed writes are separated
   by 1–3 seconds.
