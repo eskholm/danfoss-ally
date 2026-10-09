@@ -205,6 +205,15 @@ danfoss_ally_room_assistant:
                     {% endif %}
                     {{ ns.payload | to_json }}
 
+    # Give Zigbee2MQTT time to report target changes before processing
+    # queued echoes. A subsequent manual change remains queued, not lost.
+    - if:
+        - condition: template
+          value_template: "{{ is_number(new_target_temp) }}"
+      then:
+        - delay:
+            seconds: 5
+
 danfoss_ally_time_sync:
   alias: Danfoss Ally - Staggered Time Sync
   description: >
