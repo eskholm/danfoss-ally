@@ -74,6 +74,31 @@ Danfoss Ally in radiator-covered / external-room-sensor mode needs a fresh
 external temperature within 30 minutes. The periodic 10-minute refresh
 provides margin, assuming Home Assistant and Zigbee2MQTT are functioning.
 
+## Following a run in Activity (Logbook)
+
+Every Room Assistant run writes a START and END entry with the same
+`[run_id]` (for example `[20261009-205500-123456]`). Entries include the
+invocation reason, source/target setpoint, first TRV used as the room key,
+mean temperature/load, number of TRVs, and elapsed time. Open **Activity**
+(Logbook) in Home Assistant and filter on the first climate entity in
+the room. Use the run ID to relate entries in a busy room. A missing END
+entry suggests the run was interrupted or failed and should be checked in
+the script trace and HA logs; START/END do not confirm physical Zigbee
+delivery.
+
+Enable **Detailed run logging** in an individual room's blueprint instance
+to additionally record CALC, per-TRV MQTT sends, switch commands and clock
+updates. Default is off to avoid unnecessarily growing Recorder. The delayed
+clock updates use the originating room run ID, even when they finish much
+later. Clock details are only logged when detailed logging was enabled at
+the time the job was scheduled.
+
+Room Assistant retains 100 traces, and the high-volume time-sync helper
+retains 20. Trace retention is still bounded; Activity log entries follow
+the Recorder retention configuration. The Activity logger is affected by
+Logbook include/exclude filters. Changing logging does not create MQTT or
+Zigbee traffic.
+
 ## Migration from the earlier version
 
 Both scripts must be installed together. Previous automation instances should
