@@ -90,6 +90,8 @@ actions:
               heat_available_sensor: !input heat_available_sensor
               heat_available_threshold: !input heat_available_threshold
     default:
+      - condition: template
+        value_template: "{{ trigger.id == 'periodic' }}"
       # Capture the hourly decision BEFORE staggering this room's update.
       - variables:
           request_time_sync: "{{ now().minute == 0 }}"
