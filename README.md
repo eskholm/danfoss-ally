@@ -42,13 +42,15 @@ starts `script.danfoss_ally_time_sync` independently for each TRV.
   than 5 minutes, its MQTT request includes both external temperature and
   occupied heating setpoint. The source TRV may receive a temperature-only
   message because it already has the new target. The feedback is normally
-  exposed as a \`number.*_external_measured_room_sensor\` entity associated
+  exposed as a `number.*_external_measured_room_sensor` entity associated
   with the same Home Assistant device. When that feedback is missing or
   unavailable, the temperature is sent as a conservative fallback.
 - Setpoint events are queued per room and echoed updates that already agree
   with the other TRVs are ignored. Mirrored requests are separated by 1–3
-  seconds. A periodic update runs non-blockingly, preserving its 0–119 second
-  jitter without blocking setpoints.
+  seconds. A five-second settling interval lets mirrored targets be
+  reported before the next queued event is checked. A periodic update
+  runs non-blockingly, preserving its 0–119 second jitter without
+  blocking setpoints.
 - A combined MQTT JSON payload may still produce multiple Zigbee writes in
   Zigbee2MQTT. This is traffic reduction, not a global Zigbee rate limiter.
 - Window-entity changes cause an immediate room-data refresh. The blueprint
