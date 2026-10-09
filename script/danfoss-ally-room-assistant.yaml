@@ -1,126 +1,221 @@
 danfoss_ally_room_assistant:
   alias: Danfoss Ally - Room Assistant
-  description: 'This script manages Danfoss Ally TRVs by calculating average load
-    estimates and room temperatures, publishing updates via MQTT, and synchronizing
-    target temperatures across multiple devices. It also handles load balancing, time
-    synchronization, and radiator coverage activation to improve heating comfort.
-
-    '
+  description: >
+    Publish the room's external temperature and radiator load via Zigbee2MQTT.
+    Optionally synchronize setpoints, update heat availability, and schedule
+    independent, randomly delayed time synchronization jobs.
   icon: mdi:thermostat-cog
   mode: parallel
+  max: 100
   fields:
     climate_entities:
-      description: List of Danfoss Ally climate entities (TRVs) for load calculation
-        and synchronization.
-      example: climate.living_room, climate.bedroom
+      description: Danfoss Ally climate entities in the room.
       required: true
+      example: ["climate.living_room", "climate.living_room_2"]
     temperature_entities:
-      description: List of temperature sensor entities for room temperature averaging.
-      example: sensor.living_room_temp, sensor.bedroom_temp
+      description: Temperature sensors for the room average.
+      required: true
+      example: ["sensor.living_room_temp"]
+    requested_temperature:
+      description: Optional target temperature to synchronize.
+      required: false
+    changed_entity:
+      description: Optional climate entity originating a setpoint change.
+      required: false
+    update_readings:
+      description: Set false when only synchronizing a setpoint.
+      required: false
+    time_sync:
+      description: Schedule a staggered clock update for each thermostat.
+      required: false
+    heat_available_sensor:
+      description: Optional supply temperature sensor for heat_available.
+      required: false
+    heat_available_threshold:
+      description: Supply temperature threshold in °C (default 50).
+      required: false
+  sequence:
+    - variables:
+        send_readings: "{{ update_readings | default(true) | bool }}"
+        schedule_time_sync: "{{ time_sync | default(false) | bool }}"
+        new_target_temp: "{{ requested_temperature | default(none) }}"
+        source_entity: "{{ changed_entity | default('') }}"
+        supply_sensor: "{{ heat_available_sensor | default('') }}"
+        supply_threshold: "{{ heat_available_threshold | default(50) | float }}"
+
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: "{{ send_readings or schedule_time_sync }}"
+          sequence:
+            # Only numeric sensor readings contribute; unknown/unavailable must
+            # not be converted to zero degrees.
+            - variables:
+                valid_temperatures: >-
+                  {% set ns = namespace(values=[]) %}
+                  {% for entity in temperature_entities %}
+                    {% set value = states(entity) %}
+                    {% if is_number(value) %}
+                      {% set ns.values = ns.values + [value | float] %}
+                    {% endif %}
+                  {% endfor %}
+                  {{ ns.values }}
+                valid_loads: >-
+                  {% set ns = namespace(values=[]) %}
+                  {% for entity in climate_entities %}
+                    {% set load_entity = entity | replace('climate.', 'sensor.') ~ '_load_estimate' %}
+                    {% set value = states(load_entity) %}
+                    {% if is_number(value) and 0 <= value | float <= 3600 %}
+                      {% set ns.values = ns.values + [value | float] %}
+                    {% endif %}
+                  {% endfor %}
+                  {{ ns.values }}
+            - variables:
+                average_temp: >-
+                  {{ ((valid_temperatures | sum / valid_temperatures | count) * 100)
+                     | round(0) | int if valid_temperatures | count > 0 else none }}
+                average_load: >-
+                  {{ (valid_loads | sum / valid_loads | count) | round(0) | int
+                     if valid_loads | count > 0 else -8000 }}
+            - repeat:
+                for_each: "{{ climate_entities }}"
+                sequence:
+                  - variables:
+                      mqtt_topic: >-
+                        {%- set val = states('input_text.' ~ repeat.item.split('.')[1] ~ '_base_topic') -%}
+                        {{ (val if val not in ['unknown', 'unavailable', ''] else 'zigbee2mqtt')
+                           | trim }}/{{ state_attr(repeat.item, 'friendly_name') }}/set
+                      cover_switch: >-
+                        {{ repeat.item | replace('climate.', 'switch.') ~ '_radiator_covered' }}
+                      heat_switch: >-
+                        {{ repeat.item | replace('climate.', 'switch.') ~ '_heat_available' }}
+
+                  # No long delay in the room loop. Each thermostat's clock
+                  # update runs independently, randomly within the next hour.
+                  - if:
+                      - condition: template
+                        value_template: "{{ schedule_time_sync }}"
+                    then:
+                      - action: script.turn_on
+                        target:
+                          entity_id: script.danfoss_ally_time_sync
+                        data:
+                          variables:
+                            mqtt_topic: "{{ mqtt_topic }}"
+
+                  - if:
+                      - condition: template
+                        value_template: "{{ send_readings and average_temp is not none }}"
+                    then:
+                      # Spread ordinary Zigbee traffic across thermostats.
+                      - delay:
+                          seconds: "{{ range(2, 6) | random }}"
+                      - action: mqtt.publish
+                        data:
+                          topic: "{{ mqtt_topic }}"
+                          payload: >-
+                            {{ {'external_measured_room_sensor': average_temp | int,
+                                'load_room_mean': average_load | int} | to_json }}
+                      - if:
+                          - condition: template
+                            value_template: "{{ is_state(cover_switch, 'off') }}"
+                        then:
+                          - action: switch.turn_on
+                            target:
+                              entity_id: "{{ cover_switch }}"
+
+                      - if:
+                          - condition: template
+                            value_template: >-
+                              {{ supply_sensor | length > 0 and is_number(states(supply_sensor))
+                                 and states(heat_switch) in ['on', 'off'] }}
+                        then:
+                          - choose:
+                              - conditions:
+                                  - condition: template
+                                    value_template: >-
+                                      {{ states(supply_sensor) | float > supply_threshold
+                                         and is_state(heat_switch, 'off') }}
+                                sequence:
+                                  - action: switch.turn_on
+                                    target:
+                                      entity_id: "{{ heat_switch }}"
+                              - conditions:
+                                  - condition: template
+                                    value_template: >-
+                                      {{ states(supply_sensor) | float <= supply_threshold
+                                         and is_state(heat_switch, 'on') }}
+                                sequence:
+                                  - action: switch.turn_off
+                                    target:
+                                      entity_id: "{{ heat_switch }}"
+
+    # A setpoint change bypasses the long hourly delay and the reading updates.
+    # Skip devices which already report the requested target to avoid echo storms.
+    - if:
+        - condition: template
+          value_template: "{{ is_number(new_target_temp) }}"
+      then:
+        - repeat:
+            for_each: >-
+              {{ climate_entities | reject('equalto', source_entity) | list }}
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ is_number(state_attr(repeat.item, 'temperature'))
+                         and state_attr(repeat.item, 'temperature') | float
+                             != new_target_temp | float }}
+                then:
+                  - delay:
+                      seconds: "{{ range(1, 4) | random }}"
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ is_number(state_attr(repeat.item, 'temperature'))
+                             and state_attr(repeat.item, 'temperature') | float
+                                 != new_target_temp | float }}
+                    then:
+                      - action: climate.set_temperature
+                        data:
+                          entity_id: "{{ repeat.item }}"
+                          temperature: "{{ new_target_temp | float }}"
+
+danfoss_ally_time_sync:
+  alias: Danfoss Ally - Staggered Time Sync
+  description: >
+    Independent clock update for one thermostat, randomly delayed over an hour.
+    Called non-blockingly by Danfoss Ally - Room Assistant.
+  icon: mdi:clock-sync
+  mode: parallel
+  max: 250
+  fields:
+    mqtt_topic:
+      description: Zigbee2MQTT set topic of one thermostat.
       required: true
   sequence:
-  - variables:
-      load_entities: '{{ climate_entities | map("replace", "climate.", "sensor.")
-        | map("regex_replace", "$", "_load_estimate") | list }}'
-      total_load: '{{ load_entities | map("states") | map("float", 0) | select("gt",
-        -500) | sum }}'
-      load_count: '{{ load_entities | map("states") | map("float", 0) | select("gt",
-        -500) | list | count }}'
-      average_load: '{{ (total_load / load_count) | round(0) if load_count > 0 else
-        -8000 }}'
-      total_temp: '{{ temperature_entities | map("states") | map("float", 0) | sum
-        }}'
-      temp_count: '{{ temperature_entities | count }}'
-      average_temp: '{{ ((total_temp / temp_count) * 100) | round(0) if temp_count
-        > 0 else -8000 }}'
-      new_target_temp: '{{ trigger.to_state.attributes.temperature if trigger and
-        trigger.to_state and trigger.to_state.attributes.temperature is not none else
-        None }}'
-      reference_time: '{{ as_timestamp("2000-01-01T00:00:00") }}'
-      dst_start: '{{ as_timestamp((now().replace(month=3, day=31) - timedelta(days=(now().replace(month=3,
-        day=31).weekday() + 1) % 7)).replace(hour=2, minute=0, second=0)) }}'
-      dst_end: '{{ as_timestamp((now().replace(month=10, day=31) - timedelta(days=(now().replace(month=10,
-        day=31).weekday() + 1) % 7)).replace(hour=3, minute=0, second=0)) }}'
-  - repeat:
-      for_each: '{{ climate_entities }}'
-      sequence:
-      - variables:
-          base_topic: '{% set val = states("input_text." ~ repeat.item.split(''.'')[1]
-            ~ "_base_topic") %} {% if val == "unknown" %}zigbee2mqtt{% else %}{{ val
-            }}{% endif %}'
-      - choose:
-        - conditions:
-          - condition: template
-            value_template: '{{ now().minute == 0 }}'
-          sequence:
-          - variables:
-              random_delay: '{{ range(0, 3600) | random }}'
-          - action: logbook.log
-            data:
-              name: MQTT Update - Time Sync
-              message: Publishing time sync to MQTT for entity {{ repeat.item }} with
-                a random delay of {{ random_delay }} seconds.
-          - delay:
-              seconds: '{{ random_delay }}'
-          - data:
-              topic: '{{ base_topic }}/{{ state_attr(repeat.item, "friendly_name")
-                }}/set'
-              payload: "{\n  \"write\":{\n    \"cluster\":\"genTime\",\n    \"options\":{},\n
-                \   \"payload\":{\n      \"time\":{{ utcnow().timestamp() - reference_time
-                }},\n      \"dstEnd\":{{ dst_end - reference_time }},\n      \"dstStart\":{{
-                dst_start - reference_time }},\n      \"timeZone\":{{ now().utcoffset().total_seconds()
-                }},\n      \"timeStatus\":1\n    }\n  }\n}\n"
-            action: mqtt.publish
-      - choose:
-        - conditions:
-          - condition: template
-            value_template: '{{ temperature_entities | count > 0 }}'
-          sequence:
-          - action: logbook.log
-            data:
-              name: MQTT Update - Temp
-              message: Publishing average temperature ({{ average_temp }}) and load
-                ({{ average_load }}) to MQTT for entity {{ repeat.item }}.
-          - data:
-              topic: '{{ base_topic }}/{{ state_attr(repeat.item, "friendly_name")
-                }}/set'
-              payload: "{\n  \"external_measured_room_sensor\": {{ average_temp }}\n}\n"
-            action: mqtt.publish
-          - data:
-              topic: '{{ base_topic }}/{{ state_attr(repeat.item, "friendly_name")
-                }}/set'
-              payload: "{\n  \"load_room_mean\": {{ average_load }}\n}\n"
-            action: mqtt.publish
-          - data:
-              entity_id: '{{ repeat.item.replace("climate.", "switch.") + "_radiator_covered"
-                }}'
-            action: switch.turn_on
-  - choose:
-    - conditions:
-      - condition: template
-        value_template: '{{ new_target_temp is not none }}'
-      sequence:
-      - action: logbook.log
-        data:
-          name: Target Temperature Sync
-          message: Synchronizing new target temperature ({{ new_target_temp }}) to
-            all TRVs.
-      - repeat:
-          for_each: '{{ climate_entities | reject("equalto", trigger.entity_id) |
-            list }}'
-          sequence:
-          - data:
-              entity_id: '{{ repeat.item }}'
-              temperature: '{{ new_target_temp }}'
-            action: climate.set_temperature
-  - action: logbook.log
-    data:
-      name: Finalization
-      message: 'Calculation completed. Actions performed: - Average Load: {{ average_load
-        }} (Published to MQTT) - Average Temperature: {{ average_temp / 100 }}°C (Published
-        to MQTT) - Time synchronization sent at top of the hour (if applicable) -
-        Radiator coverage activated if external sensors were present - Target temperature
-        synchronized to {{ new_target_temp if new_target_temp is not none else "not
-        updated" }}.
-
-        '
+    - delay:
+        seconds: "{{ range(0, 3600) | random }}"
+    - variables:
+        # Zigbee genTime uses seconds since 2000-01-01 00:00:00 UTC.
+        reference_time: "{{ as_timestamp('2000-01-01T00:00:00+00:00') }}"
+        dst_start: >-
+          {{ as_timestamp(
+             (now().replace(month=3, day=31) -
+              timedelta(days=(now().replace(month=3, day=31).weekday() + 1) % 7))
+             .replace(hour=2, minute=0, second=0)) }}
+        dst_end: >-
+          {{ as_timestamp(
+             (now().replace(month=10, day=31) -
+              timedelta(days=(now().replace(month=10, day=31).weekday() + 1) % 7))
+             .replace(hour=3, minute=0, second=0)) }}
+    - action: mqtt.publish
+      data:
+        topic: "{{ mqtt_topic }}"
+        payload: >-
+          {{ {'write': {'cluster': 'genTime', 'options': {},
+                        'payload': {'time': (utcnow().timestamp() - reference_time) | int,
+                                    'dstEnd': (dst_end - reference_time) | int,
+                                    'dstStart': (dst_start - reference_time) | int,
+                                    'timeZone': now().utcoffset().total_seconds() | int,
+                                    'timeStatus': 1}}} | to_json }}
