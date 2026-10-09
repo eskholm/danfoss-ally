@@ -40,6 +40,14 @@ blueprint:
         entity:
           domain: sensor
           device_class: temperature
+    detailed_logging:
+      name: Detailed run logging
+      description: >
+        Write per-thermostat actions to Home Assistant Activity, in addition
+        to the default START/END run entries. Can produce many log entries.
+      default: false
+      selector:
+        boolean: {}
     heat_available_threshold:
       name: Heat available above (°C)
       default: 50
@@ -94,6 +102,8 @@ actions:
               climate_entities: !input climate_entities
               temperature_entities: !input temperature_entities
               update_readings: false
+              call_reason: setpoint
+              detailed_logging: !input detailed_logging
               requested_temperature: "{{ trigger.to_state.attributes.temperature }}"
               changed_entity: "{{ trigger.entity_id }}"
       - conditions:
@@ -106,6 +116,8 @@ actions:
               temperature_entities: !input temperature_entities
               heat_available_sensor: !input heat_available_sensor
               heat_available_threshold: !input heat_available_threshold
+              call_reason: window
+              detailed_logging: !input detailed_logging
     default:
       - condition: template
         value_template: "{{ trigger.id == 'periodic' }}"
@@ -123,6 +135,8 @@ actions:
             heat_available_sensor: !input heat_available_sensor
             heat_available_threshold: !input heat_available_threshold
             stagger_room: true
+            call_reason: periodic
+            detailed_logging: !input detailed_logging
             time_sync: "{{ request_time_sync }}"
 
 # One automation instance per room. Mirrored setpoint state changes are
